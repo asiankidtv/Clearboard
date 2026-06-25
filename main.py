@@ -1,11 +1,16 @@
 import cv2 as cv
 import mediapipe as mp
-import numpy
 from time import time
 
+# About 35 ms between each frame
+# Up in the y-axis is negative, down is positive
 HAND_TASK_PATH = "./hand_landmarker.task"
 CAMERA_ID = 0
 CURRENT_FRAME = None
+THRESHOLD = 5 * pow(10, -6)
+
+INDEX_POS = []
+TIMESTAMPS = []
 
 def annotate_hands(rgbImage, detectionResult):
     # Objects that google uses for this annotation.
@@ -35,13 +40,30 @@ def annotate_hands(rgbImage, detectionResult):
 # Create a hand landmarker instance with the live stream mode:
 def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int): # type: ignore
     global CURRENT_FRAME
+    global INDEX_POS
 
+    # ---- Key Press Detection Logic ----
+    if result.hand_landmarks:
+        if len(INDEX_POS) >= 15:
+            INDEX_POS.pop(0)
+            TIMESTAMPS.pop(0)
+        INDEX_POS.append(result.hand_world_landmarks[0][8].y)
+        TIMESTAMPS.append(timestamp_ms)
+
+        # Just chekc for velocity now over  the entire time interval, make time window short enough so if it is 
+        # Split window into half to compare the beginning and the end.
+        if len(INDEX_POS) > 3 and len(TIMESTAMPS) > 3:
+            firstVelocity = (INDEX_POS[-2] - INDEX_POS[-3]) / ((TIMESTAMPS[-2] - TIMESTAMPS[-3]) * 1000)
+            secondVelocity = (INDEX_POS[-1] - INDEX_POS[-2]) / ((timestamp_ms - TIMESTAMPS[-2]) * 1000)
+            print(secondVelocity)
+
+            if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
+                print(f"Key Press Detected at {timestamp_ms}")
+    # ---- End Key Press Logic ----
 
     DrawnFrame = output_image.numpy_view().copy() # Gets an rgb image to annotate.
     DrawnFrame = annotate_hands(DrawnFrame, result)
-
     DrawnFrame = cv.cvtColor(DrawnFrame, cv.COLOR_RGB2BGR)
-    
 
     CURRENT_FRAME = DrawnFrame
 
@@ -86,4 +108,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        print(e)
