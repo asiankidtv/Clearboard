@@ -5,15 +5,24 @@ from ultralytics import YOLO
 
 # About 35 ms between each frame
 # Up in the y-axis is negative, down is positive
+
+# Global Variables to change for the funsies whenever
 HAND_TASK_PATH = "./hand_landmarker.task"
 CAMERA_ID = 0
 CONFIDENCE_REQ = 0.5
 CURRENT_FRAME = None
 THRESHOLD = 1 * pow(10, -7)
 
+# Code Variables.
 CORNERS = []
-INDEX_POS = []
-TIMESTAMPS = []
+FINGERTIP_POS = {
+    "Left": {},
+    "Right": {},
+}
+TIMESTAMPS = {
+    "Left": {},
+    "Right": {},
+}
 
 def annotateHands(rgbImage, detectionResult):
     # Objects that google uses for this annotation.
@@ -43,26 +52,39 @@ def annotateHands(rgbImage, detectionResult):
 # Create a hand landmarker instance with the live stream mode:
 def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int): # type: ignore
     global CURRENT_FRAME
-    global INDEX_POS
+    global FINGERTIP_POS
 
-    # ---- Key Press Detection Logic ----
+    # ---- Updates Locations and timestamps for each fingertip
     if result.hand_landmarks:
-        if len(INDEX_POS) >= 15:
-            INDEX_POS.pop(0)
-            TIMESTAMPS.pop(0)
-        INDEX_POS.append(result.hand_world_landmarks[0][8].y)
-        TIMESTAMPS.append(timestamp_ms)
+        for i, hand in enumerate(result.handedness):
+            handedness = hand[0].category_name
+            for lmId, landmark in enumerate(result.hand_world_landmarks[i]):
+                # Only gathers fingertip data
+                if lmId % 4 != 0 or lmId == 0:
+                    continue
+                
+                # If a location list for the fingertip or timestamp has not been created yet, add one.
+                if FINGERTIP_POS[handedness].get(lmId, -1) == -1:
+                    FINGERTIP_POS[handedness][lmId] = []
+                    TIMESTAMPS[handedness][lmId] = []
 
-        # Just chekc for velocity now over  the entire time interval, make time window short enough so if it is 
-        # Split window into half to compare the beginning and the end.
-        if len(INDEX_POS) > 3 and len(TIMESTAMPS) > 3:
-            firstVelocity = (INDEX_POS[-2] - INDEX_POS[-3]) / ((TIMESTAMPS[-2] - TIMESTAMPS[-3]) * 1000)
-            secondVelocity = (INDEX_POS[-1] - INDEX_POS[-2]) / ((timestamp_ms - TIMESTAMPS[-2]) * 1000)
-            print(abs(secondVelocity - firstVelocity))
+                if len(FINGERTIP_POS[handedness][lmId]) >= 15:
+                    FINGERTIP_POS[handedness][lmId].pop(0)
+                    FINGERTIP_POS[handedness][lmId].pop(0)
 
-            if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
-                print(f"Key Press Detected at {timestamp_ms}")
-    # ---- End Key Press Logic ----
+                FINGERTIP_POS[handedness][lmId].append(landmark.y)
+                TIMESTAMPS[handedness][lmId].append(timestamp_ms)
+
+                # ---- Key Press Logic, VERY SKETCHY PROB NEED TO CHANGE LATER ----
+                if len(FINGERTIP_POS[handedness][lmId]) > 4 and len(TIMESTAMPS[handedness][lmId]) > 4:
+                    firstVelocity = (FINGERTIP_POS[handedness][lmId][-2] - FINGERTIP_POS[handedness][lmId][-3]) / ((TIMESTAMPS[handedness][lmId][-2] - TIMESTAMPS[handedness][lmId][-3]) * 1000)
+                    secondVelocity = (FINGERTIP_POS[handedness][lmId][-1] - FINGERTIP_POS[handedness][lmId][-2]) / ((timestamp_ms - TIMESTAMPS[handedness][lmId][-2]) * 1000)
+
+                    if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
+                        print(f"Key Press for {handedness} hand, tip {lmId} detected at {timestamp_ms}")
+                # ---- End VERY SKETCHY Key press logic ----
+                
+    # ---- End Fingertip update logix ----
 
     DrawnFrame = output_image.numpy_view().copy() # Gets an rgb image to annotate.
     DrawnFrame = annotateHands(DrawnFrame, result)
