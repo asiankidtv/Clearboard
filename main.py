@@ -1,18 +1,21 @@
 import cv2 as cv
 import mediapipe as mp
-from time import time
+from time import sleep, time
+from ultralytics import YOLO
 
 # About 35 ms between each frame
 # Up in the y-axis is negative, down is positive
 HAND_TASK_PATH = "./hand_landmarker.task"
 CAMERA_ID = 0
+CONFIDENCE_REQ = 0.5
 CURRENT_FRAME = None
-THRESHOLD = 5 * pow(10, -6)
+THRESHOLD = 1 * pow(10, -7)
 
+CORNERS = []
 INDEX_POS = []
 TIMESTAMPS = []
 
-def annotate_hands(rgbImage, detectionResult):
+def annotateHands(rgbImage, detectionResult):
     # Objects that google uses for this annotation.
     mp_hands = mp.tasks.vision.HandLandmarksConnections
     mp_drawing = mp.tasks.vision.drawing_utils
@@ -35,7 +38,7 @@ def annotate_hands(rgbImage, detectionResult):
         )
     
     return rgbImage
-
+    
 
 # Create a hand landmarker instance with the live stream mode:
 def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int): # type: ignore
@@ -55,25 +58,28 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
         if len(INDEX_POS) > 3 and len(TIMESTAMPS) > 3:
             firstVelocity = (INDEX_POS[-2] - INDEX_POS[-3]) / ((TIMESTAMPS[-2] - TIMESTAMPS[-3]) * 1000)
             secondVelocity = (INDEX_POS[-1] - INDEX_POS[-2]) / ((timestamp_ms - TIMESTAMPS[-2]) * 1000)
-            print(secondVelocity)
+            print(abs(secondVelocity - firstVelocity))
 
             if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
                 print(f"Key Press Detected at {timestamp_ms}")
     # ---- End Key Press Logic ----
 
     DrawnFrame = output_image.numpy_view().copy() # Gets an rgb image to annotate.
-    DrawnFrame = annotate_hands(DrawnFrame, result)
+    DrawnFrame = annotateHands(DrawnFrame, result)
     DrawnFrame = cv.cvtColor(DrawnFrame, cv.COLOR_RGB2BGR)
 
     CURRENT_FRAME = DrawnFrame
 
 def main():
+    global CORNERS
+
     BaseOptions = mp.tasks.BaseOptions
     HandLandmarker = mp.tasks.vision.HandLandmarker
     HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
     VisionRunningMode = mp.tasks.vision.RunningMode
 
     cam = cv.VideoCapture(CAMERA_ID, cv.CAP_AVFOUNDATION)
+    model = YOLO("best.pt")
 
     options = HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=HAND_TASK_PATH),
@@ -81,7 +87,21 @@ def main():
         result_callback=visualizeResult,
         num_hands=2,
     )
-    
+
+    startTime = time()
+    started = False
+    while time() - startTime < 5:
+        started, frame = cam.read()
+        if not started:
+            print("Warming Up, frame not found")
+        else:
+            break
+        sleep(0.1)
+
+    if not started:
+        print("Camera could not start")
+        cam.release()
+
     with HandLandmarker.create_from_options(options) as landmarker:
         while True:
             frameExists, frame = cam.read()
@@ -89,7 +109,16 @@ def main():
                 print("Camera Frame not Found.")
                 break
                 
-            # Attempts Annotation
+            # Attempts Annotation for keyboard
+            results = model.track(frame, persist=True, conf=CONFIDENCE_REQ, verbose=False)
+            for result in results:
+                if result.obb is not None:
+                    for corners in result.obb.xyxyxyxy:
+                        pts = corners.cpu().numpy().reshape((-1, 1, 2)).astype(int)
+                        CORNERS = pts.tolist()
+                        cv.polylines(frame, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+
+            # Annotation for hands
             rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
             landmarker.detect_async(mp_image, int(time() * 1000))
@@ -100,8 +129,13 @@ def main():
             else:
                 cv.imshow("Hand Result", frame)
 
-            if cv.waitKey(1) & 0xFF == ord('q'):
+            key = cv.waitKey(1)
+            if key & 0xFF == ord('q'):
                 break
+            elif key & 0xFF == ord('c'):
+                print("Keyboard Corners Locked")
+                print(CORNERS)
+
     
     cam.release()
     cv.destroyAllWindows()
