@@ -9,12 +9,14 @@ from ultralytics import YOLO
 # Global Variables to change for the funsies whenever
 HAND_TASK_PATH = "./hand_landmarker.task"
 CAMERA_ID = 0
-CONFIDENCE_REQ = 0.5
+CONFIDENCE_REQ = 0.5 # For keyboard detection.
 CURRENT_FRAME = None
 THRESHOLD = 1 * pow(10, -7)
 
 # Code Variables.
 CORNERS = []
+CORNERS_LOCKED = False
+LAST_TIMESTAMP = 0
 FINGERTIP_POS = {
     "Left": {},
     "Right": {},
@@ -47,17 +49,21 @@ def annotateHands(rgbImage, detectionResult):
         )
     
     return rgbImage
-    
 
 # Create a hand landmarker instance with the live stream mode:
 def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int): # type: ignore
     global CURRENT_FRAME
     global FINGERTIP_POS
-
+    global LAST_TIMESTAMP
+    
     # ---- Updates Locations and timestamps for each fingertip
-    if result.hand_landmarks:
+    if result.hand_world_landmarks and LAST_TIMESTAMP < timestamp_ms:
+        LAST_TIMESTAMP = timestamp_ms
         for i, hand in enumerate(result.handedness):
             handedness = hand[0].category_name
+
+            # Theres a bug where if only half the hand is revealed, other joints will be added as the other points. 
+                #ok this isnt a problem mediapipe already takes this in to account.
             for lmId, landmark in enumerate(result.hand_world_landmarks[i]):
                 # Only gathers fingertip data
                 if lmId % 4 != 0 or lmId == 0:
@@ -70,18 +76,27 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
 
                 if len(FINGERTIP_POS[handedness][lmId]) >= 15:
                     FINGERTIP_POS[handedness][lmId].pop(0)
-                    FINGERTIP_POS[handedness][lmId].pop(0)
+                
+                if len(TIMESTAMPS[handedness][lmId]) >= 15:
+                    TIMESTAMPS[handedness][lmId].pop(0)
 
                 FINGERTIP_POS[handedness][lmId].append(landmark.y)
-                TIMESTAMPS[handedness][lmId].append(timestamp_ms)
+                
+                if not (timestamp_ms in TIMESTAMPS[handedness][lmId]):
+                    TIMESTAMPS[handedness][lmId].append(timestamp_ms)
 
                 # ---- Key Press Logic, VERY SKETCHY PROB NEED TO CHANGE LATER ----
-                if len(FINGERTIP_POS[handedness][lmId]) > 4 and len(TIMESTAMPS[handedness][lmId]) > 4:
-                    firstVelocity = (FINGERTIP_POS[handedness][lmId][-2] - FINGERTIP_POS[handedness][lmId][-3]) / ((TIMESTAMPS[handedness][lmId][-2] - TIMESTAMPS[handedness][lmId][-3]) * 1000)
-                    secondVelocity = (FINGERTIP_POS[handedness][lmId][-1] - FINGERTIP_POS[handedness][lmId][-2]) / ((timestamp_ms - TIMESTAMPS[handedness][lmId][-2]) * 1000)
+                try:
+                    if len(FINGERTIP_POS[handedness][lmId]) > 4 and len(TIMESTAMPS[handedness][lmId]) > 4:
+                            firstVelocity = (FINGERTIP_POS[handedness][lmId][-2] - FINGERTIP_POS[handedness][lmId][-3]) / ((TIMESTAMPS[handedness][lmId][-2] - TIMESTAMPS[handedness][lmId][-3]) * 1000)
+                            secondVelocity = (FINGERTIP_POS[handedness][lmId][-1] - FINGERTIP_POS[handedness][lmId][-2]) / ((TIMESTAMPS[handedness][lmId][-1] - TIMESTAMPS[handedness][lmId][-2]) * 1000)
 
-                    if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
-                        print(f"Key Press for {handedness} hand, tip {lmId} detected at {timestamp_ms}")
+                            if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
+                                print(f"Key Press for {handedness} hand, tip {lmId} detected at {timestamp_ms}")
+                except ZeroDivisionError:
+                    print("----Division By Zero Error!!!!----")
+                    print(TIMESTAMPS[handedness][lmId])
+                    print("------------------------------\n")
                 # ---- End VERY SKETCHY Key press logic ----
                 
     # ---- End Fingertip update logix ----
@@ -94,6 +109,7 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
 
 def main():
     global CORNERS
+    global CORNERS_LOCKED
 
     BaseOptions = mp.tasks.BaseOptions
     HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -132,13 +148,19 @@ def main():
                 break
                 
             # Attempts Annotation for keyboard
-            results = model.track(frame, persist=True, conf=CONFIDENCE_REQ, verbose=False)
-            for result in results:
-                if result.obb is not None:
-                    for corners in result.obb.xyxyxyxy:
-                        pts = corners.cpu().numpy().reshape((-1, 1, 2)).astype(int)
-                        CORNERS = pts.tolist()
-                        cv.polylines(frame, [pts], isClosed=True, color=(0, 255, 0), thickness=2)
+            if not CORNERS_LOCKED:
+                results = model.track(frame, persist=True, conf=CONFIDENCE_REQ, verbose=False)
+                for result in results:
+                    if result.obb is not None:
+                        for corners in result.obb.xyxyxyxy:
+                            # Moves data from gpu to ram (needed for numpy), converts to numpy array, reshapes array, then converts all values
+                            points = corners.cpu().numpy().reshape((-1, 1, 2)).astype(int)
+                            CORNERS = []
+                            for point in points:
+                                point.tolist()
+                                CORNERS.append(point)
+                            
+                            cv.polylines(frame, [points], isClosed=True, color=(0, 255, 0), thickness=2)
 
             # Annotation for hands
             rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
@@ -155,13 +177,14 @@ def main():
             if key & 0xFF == ord('q'):
                 break
             elif key & 0xFF == ord('c'):
+                CORNERS_LOCKED = True
                 print("Keyboard Corners Locked")
-                print(CORNERS)
+                for corner in corners:
+                    print(corner[0])
 
     
     cam.release()
     cv.destroyAllWindows()
-
 
 if __name__ == "__main__":
     try:
