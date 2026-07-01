@@ -1,5 +1,6 @@
 import cv2 as cv
 import mediapipe as mp
+import numpy as np
 from time import sleep, time
 from ultralytics import YOLO
 
@@ -14,10 +15,19 @@ CURRENT_FRAME = None
 THRESHOLD = 1 * pow(10, -7)
 
 # Code Variables.
-CORNERS = []
+CORNERS = None
 CORNERS_LOCKED = False
+HOMOGRAPHY = None
 LAST_TIMESTAMP = 0
 FINGERTIP_POS = {
+    "Left": {},
+    "Right": {},
+}
+FINGERTIP_IMAGE_POS = {
+    "Left": {},
+    "Right": {},
+}
+FINGERTIP_KEYBOARD_POS = {
     "Left": {},
     "Right": {},
 }
@@ -25,6 +35,47 @@ TIMESTAMPS = {
     "Left": {},
     "Right": {},
 }
+
+def extract_corners(obb_corners):
+    points = obb_corners.cpu().numpy().reshape(4, 2).astype(np.float32)
+    return order_corners(points)
+
+def order_corners(points):
+    ordered = np.zeros((4, 2), dtype=np.float32)
+
+    sums = points.sum(axis=1)
+    diffs = np.diff(points, axis=1).reshape(4)
+
+    ordered[0] = points[np.argmin(sums)]
+    ordered[1] = points[np.argmin(diffs)]
+    ordered[2] = points[np.argmax(sums)]
+    ordered[3] = points[np.argmax(diffs)]
+
+    return ordered
+
+def compute_keyboard_homography(corners):
+    normalized_keyboard = np.array([
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+    ], dtype=np.float32)
+
+    return cv.getPerspectiveTransform(corners, normalized_keyboard)
+
+def image_landmark_to_point(landmark, image_width, image_height):
+    return np.array([
+        landmark.x * image_width,
+        landmark.y * image_height,
+    ], dtype=np.float32)
+
+def map_image_point_to_keyboard(image_point):
+    if HOMOGRAPHY is None:
+        return None
+
+    point = np.array([[image_point]], dtype=np.float32)
+    keyboard_point = cv.perspectiveTransform(point, HOMOGRAPHY)
+    return keyboard_point[0][0]
 
 def annotateHands(rgbImage, detectionResult):
     # Objects that google uses for this annotation.
@@ -54,7 +105,12 @@ def annotateHands(rgbImage, detectionResult):
 def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timestamp_ms: int): # type: ignore
     global CURRENT_FRAME
     global FINGERTIP_POS
+    global FINGERTIP_IMAGE_POS
+    global FINGERTIP_KEYBOARD_POS
     global LAST_TIMESTAMP
+
+    image_data = output_image.numpy_view()
+    image_height, image_width = image_data.shape[:2]
     
     # ---- Updates Locations and timestamps for each fingertip
     if result.hand_world_landmarks and LAST_TIMESTAMP < timestamp_ms:
@@ -68,6 +124,11 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
                 # Only gathers fingertip data
                 if lmId % 4 != 0 or lmId == 0:
                     continue
+
+                image_point = image_landmark_to_point(result.hand_landmarks[i][lmId], image_width, image_height)
+                keyboard_point = map_image_point_to_keyboard(image_point)
+                FINGERTIP_IMAGE_POS[handedness][lmId] = image_point
+                FINGERTIP_KEYBOARD_POS[handedness][lmId] = keyboard_point
                 
                 # If a location list for the fingertip or timestamp has not been created yet, add one.
                 if FINGERTIP_POS[handedness].get(lmId, -1) == -1:
@@ -93,6 +154,9 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
 
                             if abs(secondVelocity - firstVelocity) > THRESHOLD and firstVelocity < 0 and secondVelocity > 0:
                                 print(f"Key Press for {handedness} hand, tip {lmId} detected at {timestamp_ms}")
+                                print(f"Image point: {image_point}")
+                                if keyboard_point is not None:
+                                    print(f"Keyboard point: {keyboard_point}")
                 except ZeroDivisionError:
                     print("----Division By Zero Error!!!!----")
                     print(TIMESTAMPS[handedness][lmId])
@@ -101,7 +165,7 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
                 
     # ---- End Fingertip update logix ----
 
-    DrawnFrame = output_image.numpy_view().copy() # Gets an rgb image to annotate.
+    DrawnFrame = image_data.copy() # Gets an rgb image to annotate.
     DrawnFrame = annotateHands(DrawnFrame, result)
     DrawnFrame = cv.cvtColor(DrawnFrame, cv.COLOR_RGB2BGR)
 
@@ -110,6 +174,7 @@ def visualizeResult(result: HandLandmarkerResult, output_image: mp.Image, timest
 def main():
     global CORNERS
     global CORNERS_LOCKED
+    global HOMOGRAPHY
 
     BaseOptions = mp.tasks.BaseOptions
     HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -154,11 +219,8 @@ def main():
                     if result.obb is not None:
                         for corners in result.obb.xyxyxyxy:
                             # Moves data from gpu to ram (needed for numpy), converts to numpy array, reshapes array, then converts all values
-                            points = corners.cpu().numpy().reshape((-1, 1, 2)).astype(int)
-                            CORNERS = []
-                            for point in points:
-                                point.tolist()
-                                CORNERS.append(point)
+                            CORNERS = extract_corners(corners)
+                            points = CORNERS.reshape((-1, 1, 2)).astype(int)
                             
                             cv.polylines(frame, [points], isClosed=True, color=(0, 255, 0), thickness=2)
 
@@ -177,10 +239,19 @@ def main():
             if key & 0xFF == ord('q'):
                 break
             elif key & 0xFF == ord('c'):
+                # Calibrate Keyboard based on the corners.
+                if CORNERS is None or CORNERS.shape != (4, 2):
+                    print("Cannot lock keyboard: no valid corners detected")
+                    continue
+
                 CORNERS_LOCKED = True
+                HOMOGRAPHY = compute_keyboard_homography(CORNERS)
                 print("Keyboard Corners Locked")
-                for corner in corners:
-                    print(corner[0])
+                for corner in CORNERS:
+                    print(corner)
+                print("Keyboard homography computed")
+                
+                # TODO: Need to use the corner points and map the location of each keypressed finger to where it falls on a top down view of keyboard.
 
     
     cam.release()
