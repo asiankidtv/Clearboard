@@ -10,7 +10,7 @@ KEYBOARD_MODEL_PATH = "best.pt"
 CAMERA_ID = 0
 CONFIDENCE_REQ = 0.65
 THRESHOLD = 1 * pow(10, -7)
-FINGERTIP_HISTORY_SIZE = 15
+FINGERTIP_HISTORY_SIZE = 3
 
 class KeyboardTracker:
     def __init__(self, confidence_req):
@@ -204,7 +204,7 @@ class HandTracker:
         positions = self.fingertip_pos[handedness][lm_id]
         timestamps = self.timestamps[handedness][lm_id]
 
-        if len(positions) <= 4 or len(timestamps) <= 4:
+        if len(positions) < 3 or len(timestamps) < 3:
             return
 
         first_velocity = self.compute_velocity(positions, timestamps, -3, -2)
