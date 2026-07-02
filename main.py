@@ -1,9 +1,11 @@
 import cv2 as cv
+from keyboardLayouts import LAPTOP_KEYS
 import mediapipe as mp
 import numpy as np
 from time import sleep, time
 from ultralytics import YOLO
 
+DETECTED_KEYBOARD = LAPTOP_KEYS
 
 HAND_TASK_PATH = "./hand_landmarker.task"
 KEYBOARD_MODEL_PATH = "best.pt"
@@ -214,10 +216,22 @@ class HandTracker:
         is_press_motion = first_velocity < 0 and second_velocity > 0
 
         if velocity_change > self.threshold and is_press_motion:
-            print(f"Key Press for {handedness} hand, tip {lm_id} detected at {timestamp_ms}")
-            print(f"Image point: {image_point}")
+            # print(f"Key Press for {handedness} hand, tip {lm_id} detected at {timestamp_ms}")
             if keyboard_point is not None:
-                print(f"Keyboard point: {keyboard_point}")
+                # print(f"Keyboard point: {keyboard_point}")
+                self.detect_key(keyboard_point)
+
+    def detect_key(self, keyboard_point):
+        for i, key in enumerate(list(DETECTED_KEYBOARD)):
+            if i != 0 and i != 1:
+                x, y, w, h = self.normalize_key(DETECTED_KEYBOARD[key])
+                if keyboard_point[0] >= x and keyboard_point[0] <= x + w and keyboard_point[1] >= y and keyboard_point[1] <= y + h:
+                    print(f"Key Pressed: {key}")
+
+    def normalize_key(self, dimensions):
+        x, y, w, h = dimensions
+        return x / DETECTED_KEYBOARD["KeyboardWidth"], y / DETECTED_KEYBOARD["KeyboardHeight"], w / DETECTED_KEYBOARD["KeyboardWidth"], h / DETECTED_KEYBOARD["KeyboardHeight"]
+
 
     def compute_velocity(self, positions, timestamps, first_index, second_index):
         return (
