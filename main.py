@@ -1,11 +1,12 @@
 import cv2 as cv
-from keyboardLayouts import LAPTOP_KEYS
+from keyboardLayouts import MACBOOK_TOP_CASE_KEYS
 import mediapipe as mp
 import numpy as np
 from time import sleep, time
+from textblob import TextBlob
 from ultralytics import YOLO
 
-DETECTED_KEYBOARD = LAPTOP_KEYS
+DETECTED_KEYBOARD = MACBOOK_TOP_CASE_KEYS
 
 HAND_TASK_PATH = "./hand_landmarker.task"
 KEYBOARD_MODEL_PATH = "best.pt"
@@ -13,16 +14,27 @@ CAMERA_ID = 0
 CONFIDENCE_REQ = 0.65
 THRESHOLD = 1 * pow(10, -7)
 FINGERTIP_HISTORY_SIZE = 3
+PRESS_COOLDOWN_MS = 150
+MANUAL_CORNER_LABELS = (
+    "top-left",
+    "top-right",
+    "bottom-right",
+    "bottom-left",
+)
+MANUAL_CORNER_SHORT_LABELS = ("TL", "TR", "BR", "BL")
 
 class KeyboardTracker:
-    def __init__(self, confidence_req):
+    def __init__(self, confidence_req, keyboard_layout):
         self.confidence_req = confidence_req
+        self.keyboard_layout = keyboard_layout
         self.corners = None
         self.locked = False
         self.homography = None
+        self.inverse_homography = None
 
     def detect(self, frame, model):
         if self.locked:
+            self.draw_key_zones(frame)
             return frame
 
         results = model.track(
@@ -43,12 +55,20 @@ class KeyboardTracker:
         return frame
     
     def lock(self):
-        if self.corners is None or self.corners.shape != (4, 2):
+        if not self.corners_are_valid(self.corners):
             return False
 
         self.locked = True
         self.homography = self.compute_homography(self.corners)
+        self.inverse_homography = self.compute_inverse_homography(self.corners)
         return True
+
+    def lock_from_points(self, points):
+        if len(points) != 4:
+            return False
+
+        self.corners = np.array(points, dtype=np.float32).reshape(4, 2)
+        return self.lock()
 
     def extract_corners(self, obb_corners):
         points = obb_corners.cpu().numpy().reshape(4, 2).astype(np.float32)
@@ -67,6 +87,20 @@ class KeyboardTracker:
 
         return ordered
 
+    def corners_are_valid(self, corners):
+        if corners is None or corners.shape != (4, 2):
+            return False
+
+        if len(np.unique(corners, axis=0)) != 4:
+            return False
+
+        contour = corners.reshape((-1, 1, 2)).astype(np.float32)
+        signed_area = cv.contourArea(contour, oriented=True)
+        if signed_area < 1000:
+            return False
+
+        return cv.isContourConvex(contour)
+
     def compute_homography(self, corners):
         normalized_keyboard = np.array([
             [0.0, 0.0],
@@ -77,12 +111,74 @@ class KeyboardTracker:
 
         return cv.getPerspectiveTransform(corners, normalized_keyboard)
 
+    def compute_inverse_homography(self, corners):
+        normalized_keyboard = np.array([
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+        ], dtype=np.float32)
+
+        return cv.getPerspectiveTransform(normalized_keyboard, corners)
+
     def draw_corners(self, frame):
         if self.corners is None:
             return
 
         points = self.corners.reshape((-1, 1, 2)).astype(int)
         cv.polylines(frame, [points], isClosed=True, color=(0, 255, 0), thickness=2)
+
+    def draw_key_zones(self, frame):
+        if self.inverse_homography is None:
+            return frame
+
+        self.draw_corners(frame)
+
+        for key, dimensions in self.keyboard_layout.items():
+            if key in ("KeyboardWidth", "KeyboardHeight"):
+                continue
+
+            key_corners = self.get_normalized_key_corners(dimensions)
+            image_corners = self.map_keyboard_points_to_image(key_corners)
+            if image_corners is None:
+                continue
+
+            points = image_corners.reshape((-1, 1, 2)).astype(int)
+            cv.polylines(frame, [points], isClosed=True, color=(0, 255, 255), thickness=1)
+
+            label_x, label_y = image_corners.mean(axis=0).astype(int)
+            cv.putText(
+                frame,
+                key,
+                (label_x - 6, label_y + 4),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.3,
+                (0, 255, 255),
+                1,
+                cv.LINE_AA,
+            )
+
+        return frame
+
+    def get_normalized_key_corners(self, dimensions):
+        x, y, w, h = dimensions
+        keyboard_width = self.keyboard_layout["KeyboardWidth"]
+        keyboard_height = self.keyboard_layout["KeyboardHeight"]
+
+        return np.array([
+            [x / keyboard_width, y / keyboard_height],
+            [(x + w) / keyboard_width, y / keyboard_height],
+            [(x + w) / keyboard_width, (y + h) / keyboard_height],
+            [x / keyboard_width, (y + h) / keyboard_height],
+        ], dtype=np.float32)
+
+    def map_keyboard_points_to_image(self, keyboard_points):
+        if self.inverse_homography is None:
+            return None
+
+        points = np.array([keyboard_points], dtype=np.float32)
+        image_points = cv.perspectiveTransform(points, self.inverse_homography)
+        return image_points[0]
 
     def map_image_point_to_keyboard(self, image_point):
         if self.homography is None:
@@ -94,10 +190,13 @@ class KeyboardTracker:
 
 
 class HandTracker:
-    def __init__(self, threshold, history_size, keyboard_tracker):
+    def __init__(self, threshold, history_size, keyboard_tracker, press_cooldown_ms):
+        self.text = ""
+        
         self.threshold = threshold
         self.history_size = history_size
         self.keyboard_tracker = keyboard_tracker
+        self.press_cooldown_ms = press_cooldown_ms
         self.current_frame = None
         self.last_timestamp = 0
         self.fingertip_pos = {
@@ -116,6 +215,10 @@ class HandTracker:
             "Left": {},
             "Right": {},
         }
+        self.last_press_timestamps = {
+            "Left": {},
+            "Right": {},
+        }
 
     def handle_result(self, result, output_image, timestamp_ms):
         image_data = output_image.numpy_view()
@@ -128,6 +231,7 @@ class HandTracker:
         drawn_frame = image_data.copy()
         drawn_frame = self.annotate_hands(drawn_frame, result)
         drawn_frame = cv.cvtColor(drawn_frame, cv.COLOR_RGB2BGR)
+        drawn_frame = self.keyboard_tracker.draw_key_zones(drawn_frame)
 
         self.current_frame = drawn_frame
 
@@ -216,10 +320,21 @@ class HandTracker:
         is_press_motion = first_velocity < 0 and second_velocity > 0
 
         if velocity_change > self.threshold and is_press_motion:
+            if self.is_in_cooldown(handedness, lm_id, timestamp_ms):
+                return
+
+            self.last_press_timestamps[handedness][lm_id] = timestamp_ms
             # print(f"Key Press for {handedness} hand, tip {lm_id} detected at {timestamp_ms}")
             if keyboard_point is not None:
                 # print(f"Keyboard point: {keyboard_point}")
                 self.detect_key(keyboard_point)
+
+    def is_in_cooldown(self, handedness, lm_id, timestamp_ms):
+        last_press_timestamp = self.last_press_timestamps[handedness].get(lm_id)
+        if last_press_timestamp is None:
+            return False
+
+        return timestamp_ms - last_press_timestamp < self.press_cooldown_ms
 
     def detect_key(self, keyboard_point):
         for i, key in enumerate(list(DETECTED_KEYBOARD)):
@@ -227,6 +342,8 @@ class HandTracker:
                 x, y, w, h = self.normalize_key(DETECTED_KEYBOARD[key])
                 if keyboard_point[0] >= x and keyboard_point[0] <= x + w and keyboard_point[1] >= y and keyboard_point[1] <= y + h:
                     print(f"Key Pressed: {key}")
+                    self.text = self.text + key
+
 
     def normalize_key(self, dimensions):
         x, y, w, h = dimensions
@@ -268,20 +385,24 @@ class HandTracker:
 
 class ClearboardApp:
     def __init__(self):
+        self.window_name = "Hand Result"
         self.hand_task_path = HAND_TASK_PATH
         self.keyboard_model_path = KEYBOARD_MODEL_PATH
         self.camera_id = CAMERA_ID
         self.confidence_req = CONFIDENCE_REQ
         self.threshold = THRESHOLD
         self.fingertip_history_size = FINGERTIP_HISTORY_SIZE
+        self.press_cooldown_ms = PRESS_COOLDOWN_MS
 
         self.cam = None
         self.keyboard_model = None
-        self.keyboard = KeyboardTracker(self.confidence_req)
+        self.manual_corner_points = []
+        self.keyboard = KeyboardTracker(self.confidence_req, DETECTED_KEYBOARD)
         self.hand_tracker = HandTracker(
             self.threshold,
             self.fingertip_history_size,
             self.keyboard,
+            self.press_cooldown_ms,
         )
 
     def run(self):
@@ -299,6 +420,9 @@ class ClearboardApp:
     def setup(self):
         self.cam = self.create_camera()
         self.keyboard_model = self.create_keyboard_model()
+        cv.namedWindow(self.window_name)
+        cv.setMouseCallback(self.window_name, self.handle_mouse_click)
+        self.print_next_manual_corner_prompt()
 
     def create_camera(self):
         return cv.VideoCapture(self.camera_id, cv.CAP_AVFOUNDATION)
@@ -369,14 +493,81 @@ class ClearboardApp:
 
     def show_frame(self, fallback_frame):
         if self.hand_tracker.current_frame is not None:
-            cv.imshow("Hand Result", self.hand_tracker.current_frame)
+            frame = self.hand_tracker.current_frame
         else:
-            cv.imshow("Hand Result", fallback_frame)
+            frame = fallback_frame
+
+        frame = frame.copy()
+        self.draw_manual_corner_points(frame)
+        cv.imshow(self.window_name, frame)
+
+    def handle_mouse_click(self, event, x, y, _flags, _param):
+        if event == cv.EVENT_RBUTTONDOWN:
+            self.manual_corner_points = []
+            print("Manual corner selection reset")
+            self.print_next_manual_corner_prompt()
+            return
+
+        if event != cv.EVENT_LBUTTONDOWN:
+            return
+
+        if self.keyboard.locked:
+            return
+
+        if len(self.manual_corner_points) >= 4:
+            self.manual_corner_points = []
+            self.print_next_manual_corner_prompt()
+
+        corner_label = MANUAL_CORNER_LABELS[len(self.manual_corner_points)]
+        self.manual_corner_points.append((x, y))
+        print(f"Manual {corner_label} corner selected: ({x}, {y})")
+
+        if len(self.manual_corner_points) == 4:
+            self.lock_keyboard_from_manual_points()
+        else:
+            self.print_next_manual_corner_prompt()
+
+    def lock_keyboard_from_manual_points(self):
+        if not self.keyboard.lock_from_points(self.manual_corner_points):
+            print("Cannot lock keyboard: manual corners were invalid")
+            print("Expected order: top-left, top-right, bottom-right, bottom-left")
+            self.manual_corner_points = []
+            self.print_next_manual_corner_prompt()
+            return
+
+        for corner in self.keyboard.corners:
+            print(corner)
+        print("Keyboard homography computed")
+
+    def print_next_manual_corner_prompt(self):
+        if len(self.manual_corner_points) >= 4:
+            return
+
+        corner_label = MANUAL_CORNER_LABELS[len(self.manual_corner_points)]
+
+    def draw_manual_corner_points(self, frame):
+        if self.keyboard.locked:
+            return
+
+        for index, point in enumerate(self.manual_corner_points):
+            x, y = point
+            cv.circle(frame, (x, y), 6, (0, 0, 255), -1)
+            cv.putText(
+                frame,
+                MANUAL_CORNER_SHORT_LABELS[index],
+                (x + 8, y - 8),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2,
+                cv.LINE_AA,
+            )
 
     def handle_keypress(self):
         key = cv.waitKey(1)
 
         if key & 0xFF == ord("q"):
+            self.correctText(self.hand_tracker.text)
             return True
 
         if key & 0xFF == ord("c"):
@@ -399,6 +590,12 @@ class ClearboardApp:
             self.cam.release()
         cv.destroyAllWindows()
 
+    def correctText(self, text):
+        if text:
+            textBlob = TextBlob(text)
+            print(textBlob.correct())
+        else:
+            print("No text detected")
 
 def main():
     app = ClearboardApp()
