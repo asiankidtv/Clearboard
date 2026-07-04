@@ -9,6 +9,7 @@ from config import (
     CONFIDENCE_REQ,
     DETECTED_KEYBOARD,
     FINGERTIP_HISTORY_SIZE,
+    KEY_HISTORY_SIZE,
     HAND_TASK_PATH,
     KEYBOARD_MODEL_PATH,
     MANUAL_CORNER_LABELS,
@@ -30,6 +31,7 @@ class ClearboardApp:
         self.confidence_req = CONFIDENCE_REQ
         self.threshold = THRESHOLD
         self.fingertip_history_size = FINGERTIP_HISTORY_SIZE
+        self.key_history_size = KEY_HISTORY_SIZE
         self.press_cooldown_ms = PRESS_COOLDOWN_MS
         self.smoothing_alpha = SMOOTHING_ALPHA
 
@@ -43,6 +45,7 @@ class ClearboardApp:
             self.keyboard,
             self.press_cooldown_ms,
             self.smoothing_alpha,
+            self.key_history_size
         )
 
     def run(self):

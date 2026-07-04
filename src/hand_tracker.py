@@ -1,3 +1,4 @@
+import collections
 import cv2 as cv
 import mediapipe as mp
 import numpy as np
@@ -11,11 +12,13 @@ class HandTracker:
         keyboard_tracker,
         press_cooldown_ms,
         smoothing_alpha,
+        key_history_size
     ):
         self.text = ""
 
         self.threshold = threshold
         self.history_size = history_size
+        self.key_history_size = key_history_size
         self.keyboard_tracker = keyboard_tracker
         self.press_cooldown_ms = press_cooldown_ms
         self.smoothing_alpha = smoothing_alpha
@@ -42,6 +45,10 @@ class HandTracker:
             "Right": {},
         }
         self.smoothed_fingertip_y = {
+            "Left": {},
+            "Right": {},
+        }
+        self.last_fingertip_keys = {
             "Left": {},
             "Right": {},
         }
@@ -111,6 +118,7 @@ class HandTracker:
             lm_id,
             smoothed_y,
             timestamp_ms,
+            keyboard_point,
         )
         self.detect_keypress(handedness, lm_id, timestamp_ms, image_point, keyboard_point)
 
@@ -121,16 +129,27 @@ class HandTracker:
         if self.fingertip_pos[handedness].get(lm_id, -1) == -1:
             self.fingertip_pos[handedness][lm_id] = []
             self.timestamps[handedness][lm_id] = []
+        if self.keyboard_tracker.locked and self.last_fingertip_keys[handedness].get(lm_id, -1) == -1:
+            self.last_fingertip_keys[handedness][lm_id] = []
 
-    def add_fingertip_sample(self, handedness, lm_id, y_value, timestamp_ms):
+
+    def add_fingertip_sample(self, handedness, lm_id, y_value, timestamp_ms, keyboard_point):
         positions = self.fingertip_pos[handedness][lm_id]
         timestamps = self.timestamps[handedness][lm_id]
+        lastKeys = None
+        if self.keyboard_tracker.locked:
+            lastKeys = self.last_fingertip_keys[handedness][lm_id]
 
         if len(positions) >= self.history_size:
             positions.pop(0)
 
         if len(timestamps) >= self.history_size:
             timestamps.pop(0)
+
+        if lastKeys is not None:
+            if len(lastKeys) >= self.key_history_size:
+                lastKeys.pop(0)
+            lastKeys.append(self.detect_key(keyboard_point))
 
         positions.append(y_value)
 
@@ -151,12 +170,14 @@ class HandTracker:
         return smoothed_y
 
     def detect_keypress(self, handedness, lm_id, timestamp_ms, image_point, keyboard_point):
+        # Appends Needed Data
         positions = self.fingertip_pos[handedness][lm_id]
         timestamps = self.timestamps[handedness][lm_id]
 
         if len(positions) < 3 or len(timestamps) < 3:
             return
 
+        # Calcs Velocity
         first_velocity = self.compute_velocity(positions, timestamps, -3, -2)
         second_velocity = self.compute_velocity(positions, timestamps, -2, -1)
 
@@ -169,7 +190,8 @@ class HandTracker:
 
             self.last_press_timestamps[handedness][lm_id] = timestamp_ms
             if keyboard_point is not None:
-                self.detect_key(keyboard_point)
+
+                self.parse_key(collections.Counter(self.last_fingertip_keys[handedness][lm_id]).most_common(1))
 
     def is_in_cooldown(self, handedness, lm_id, timestamp_ms):
         last_press_timestamp = self.last_press_timestamps[handedness].get(lm_id)
@@ -188,19 +210,21 @@ class HandTracker:
             is_inside_x = keyboard_point[0] >= x and keyboard_point[0] <= x + w
             is_inside_y = keyboard_point[1] >= y and keyboard_point[1] <= y + h
             if is_inside_x and is_inside_y:
-                self.parse_key(key)
+                return key
 
     def parse_key(self, key):
-        print(f"{key} Detected")
-        if key == "Space":
-            self.text = self.text + " "
-        elif key == "Backspace":
-            if len(self.text) >= 2:
-                self.text = self.text[0:-1]
-        elif len(key) == 1:
-            self.text = self.text + key
-        else:
-            return
+        key = key[0][0]
+        if key is not None:
+            print(f"{key} Detected")
+            if key == "Space":
+                self.text = self.text + " "
+            elif key == "Backspace":
+                if len(self.text) >= 2:
+                    self.text = self.text[0:-1]
+            elif len(key) == 1:
+                self.text = self.text + key
+            else:
+                return
 
     def normalize_key(self, dimensions):
         keyboard_layout = self.keyboard_tracker.keyboard_layout
