@@ -1,20 +1,21 @@
 import cv2 as cv
-from keyboardLayouts import MACBOOK_TOP_CASE_KEYS
+from keyboardLayouts import LAPTOP_KEYS
 import mediapipe as mp
 import numpy as np
 from time import sleep, time
 from textblob import TextBlob
 from ultralytics import YOLO
 
-DETECTED_KEYBOARD = MACBOOK_TOP_CASE_KEYS
+DETECTED_KEYBOARD = LAPTOP_KEYS
 
 HAND_TASK_PATH = "./hand_landmarker.task"
 KEYBOARD_MODEL_PATH = "best.pt"
 CAMERA_ID = 0
 CONFIDENCE_REQ = 0.65
-THRESHOLD = 1 * pow(10, -7)
+THRESHOLD = 1 * pow(10, -4)
 FINGERTIP_HISTORY_SIZE = 3
 PRESS_COOLDOWN_MS = 150
+SMOOTHING_ALPHA = 0.5
 MANUAL_CORNER_LABELS = (
     "top-left",
     "top-right",
@@ -190,13 +191,21 @@ class KeyboardTracker:
 
 
 class HandTracker:
-    def __init__(self, threshold, history_size, keyboard_tracker, press_cooldown_ms):
+    def __init__(
+        self,
+        threshold,
+        history_size,
+        keyboard_tracker,
+        press_cooldown_ms,
+        smoothing_alpha,
+    ):
         self.text = ""
         
         self.threshold = threshold
         self.history_size = history_size
         self.keyboard_tracker = keyboard_tracker
         self.press_cooldown_ms = press_cooldown_ms
+        self.smoothing_alpha = smoothing_alpha
         self.current_frame = None
         self.last_timestamp = 0
         self.fingertip_pos = {
@@ -216,6 +225,10 @@ class HandTracker:
             "Right": {},
         }
         self.last_press_timestamps = {
+            "Left": {},
+            "Right": {},
+        }
+        self.smoothed_fingertip_y = {
             "Left": {},
             "Right": {},
         }
@@ -275,10 +288,15 @@ class HandTracker:
         self.fingertip_keyboard_pos[handedness][lm_id] = keyboard_point
 
         self.ensure_fingertip_history(handedness, lm_id)
-        self.add_fingertip_sample(
+        smoothed_y = self.smooth_fingertip_y(
             handedness,
             lm_id,
             world_landmark.y,
+        )
+        self.add_fingertip_sample(
+            handedness,
+            lm_id,
+            smoothed_y,
             timestamp_ms,
         )
         self.detect_keypress(handedness, lm_id, timestamp_ms, image_point, keyboard_point)
@@ -305,6 +323,19 @@ class HandTracker:
 
         if timestamp_ms not in timestamps:
             timestamps.append(timestamp_ms)
+
+    def smooth_fingertip_y(self, handedness, lm_id, y_value):
+        previous_y = self.smoothed_fingertip_y[handedness].get(lm_id)
+        if previous_y is None:
+            smoothed_y = y_value
+        else:
+            smoothed_y = (
+                self.smoothing_alpha * y_value
+                + (1 - self.smoothing_alpha) * previous_y
+            )
+
+        self.smoothed_fingertip_y[handedness][lm_id] = smoothed_y
+        return smoothed_y
 
     def detect_keypress(self, handedness, lm_id, timestamp_ms, image_point, keyboard_point):
         positions = self.fingertip_pos[handedness][lm_id]
@@ -341,9 +372,19 @@ class HandTracker:
             if i != 0 and i != 1:
                 x, y, w, h = self.normalize_key(DETECTED_KEYBOARD[key])
                 if keyboard_point[0] >= x and keyboard_point[0] <= x + w and keyboard_point[1] >= y and keyboard_point[1] <= y + h:
-                    print(f"Key Pressed: {key}")
-                    self.text = self.text + key
+                    self.parse_key(key)
 
+    def parse_key(self, key):
+        print(f"{key} Detected")
+        if key == "Space":
+            self.text = self.text + " "
+        elif key == "Backspace":
+            if len(self.text) >= 2:
+                self.text = self.text[0:-1]
+        elif len(key) == 1:
+            self.text = self.text + key
+        else:
+            return
 
     def normalize_key(self, dimensions):
         x, y, w, h = dimensions
@@ -353,7 +394,7 @@ class HandTracker:
     def compute_velocity(self, positions, timestamps, first_index, second_index):
         return (
             (positions[second_index] - positions[first_index])
-            / ((timestamps[second_index] - timestamps[first_index]) * 1000)
+            / ((timestamps[second_index] - timestamps[first_index]))
         )
 
     def image_landmark_to_point(self, landmark, image_width, image_height):
@@ -393,6 +434,7 @@ class ClearboardApp:
         self.threshold = THRESHOLD
         self.fingertip_history_size = FINGERTIP_HISTORY_SIZE
         self.press_cooldown_ms = PRESS_COOLDOWN_MS
+        self.smoothing_alpha = SMOOTHING_ALPHA
 
         self.cam = None
         self.keyboard_model = None
@@ -403,6 +445,7 @@ class ClearboardApp:
             self.fingertip_history_size,
             self.keyboard,
             self.press_cooldown_ms,
+            self.smoothing_alpha,
         )
 
     def run(self):
@@ -422,7 +465,6 @@ class ClearboardApp:
         self.keyboard_model = self.create_keyboard_model()
         cv.namedWindow(self.window_name)
         cv.setMouseCallback(self.window_name, self.handle_mouse_click)
-        self.print_next_manual_corner_prompt()
 
     def create_camera(self):
         return cv.VideoCapture(self.camera_id, cv.CAP_AVFOUNDATION)
@@ -505,7 +547,6 @@ class ClearboardApp:
         if event == cv.EVENT_RBUTTONDOWN:
             self.manual_corner_points = []
             print("Manual corner selection reset")
-            self.print_next_manual_corner_prompt()
             return
 
         if event != cv.EVENT_LBUTTONDOWN:
@@ -516,7 +557,6 @@ class ClearboardApp:
 
         if len(self.manual_corner_points) >= 4:
             self.manual_corner_points = []
-            self.print_next_manual_corner_prompt()
 
         corner_label = MANUAL_CORNER_LABELS[len(self.manual_corner_points)]
         self.manual_corner_points.append((x, y))
@@ -524,26 +564,17 @@ class ClearboardApp:
 
         if len(self.manual_corner_points) == 4:
             self.lock_keyboard_from_manual_points()
-        else:
-            self.print_next_manual_corner_prompt()
 
     def lock_keyboard_from_manual_points(self):
         if not self.keyboard.lock_from_points(self.manual_corner_points):
             print("Cannot lock keyboard: manual corners were invalid")
             print("Expected order: top-left, top-right, bottom-right, bottom-left")
             self.manual_corner_points = []
-            self.print_next_manual_corner_prompt()
             return
 
         for corner in self.keyboard.corners:
             print(corner)
         print("Keyboard homography computed")
-
-    def print_next_manual_corner_prompt(self):
-        if len(self.manual_corner_points) >= 4:
-            return
-
-        corner_label = MANUAL_CORNER_LABELS[len(self.manual_corner_points)]
 
     def draw_manual_corner_points(self, frame):
         if self.keyboard.locked:
