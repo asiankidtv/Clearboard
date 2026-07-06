@@ -11,7 +11,9 @@ class HandTracker:
         history_size,
         keyboard_tracker,
         press_cooldown_ms,
+        min_press_travel,
         smoothing_alpha,
+        keyboard_point_smoothing_alpha,
         key_history_size
     ):
         self.text = ""
@@ -21,7 +23,9 @@ class HandTracker:
         self.key_history_size = key_history_size
         self.keyboard_tracker = keyboard_tracker
         self.press_cooldown_ms = press_cooldown_ms
+        self.min_press_travel = min_press_travel
         self.smoothing_alpha = smoothing_alpha
+        self.keyboard_point_smoothing_alpha = keyboard_point_smoothing_alpha
         self.current_frame = None
         self.last_timestamp = 0
         self.fingertip_pos = {
@@ -45,6 +49,10 @@ class HandTracker:
             "Right": {},
         }
         self.smoothed_fingertip_y = {
+            "Left": {},
+            "Right": {},
+        }
+        self.smoothed_keyboard_point = {
             "Left": {},
             "Right": {},
         }
@@ -103,9 +111,14 @@ class HandTracker:
             image_height,
         )
         keyboard_point = self.keyboard_tracker.map_image_point_to_keyboard(image_point)
+        smoothed_keyboard_point = self.smooth_keyboard_point(
+            handedness,
+            lm_id,
+            keyboard_point,
+        )
 
         self.fingertip_image_pos[handedness][lm_id] = image_point
-        self.fingertip_keyboard_pos[handedness][lm_id] = keyboard_point
+        self.fingertip_keyboard_pos[handedness][lm_id] = smoothed_keyboard_point
 
         self.ensure_fingertip_history(handedness, lm_id)
         smoothed_y = self.smooth_fingertip_y(
@@ -118,9 +131,15 @@ class HandTracker:
             lm_id,
             smoothed_y,
             timestamp_ms,
-            keyboard_point,
+            smoothed_keyboard_point,
         )
-        self.detect_keypress(handedness, lm_id, timestamp_ms, image_point, keyboard_point)
+        self.detect_keypress(
+            handedness,
+            lm_id,
+            timestamp_ms,
+            image_point,
+            smoothed_keyboard_point,
+        )
 
     def is_fingertip(self, lm_id):
         return lm_id != 0 and lm_id % 4 == 0
@@ -169,6 +188,22 @@ class HandTracker:
         self.smoothed_fingertip_y[handedness][lm_id] = smoothed_y
         return smoothed_y
 
+    def smooth_keyboard_point(self, handedness, lm_id, keyboard_point):
+        if keyboard_point is None:
+            return None
+
+        previous_point = self.smoothed_keyboard_point[handedness].get(lm_id)
+        if previous_point is None:
+            smoothed_point = keyboard_point
+        else:
+            smoothed_point = (
+                self.keyboard_point_smoothing_alpha * keyboard_point
+                + (1 - self.keyboard_point_smoothing_alpha) * previous_point
+            )
+
+        self.smoothed_keyboard_point[handedness][lm_id] = smoothed_point
+        return smoothed_point
+
     def detect_keypress(self, handedness, lm_id, timestamp_ms, image_point, keyboard_point):
         # Appends Needed Data
         positions = self.fingertip_pos[handedness][lm_id]
@@ -184,6 +219,9 @@ class HandTracker:
         velocity_change = abs(second_velocity - first_velocity)
         is_press_motion = first_velocity < 0 and second_velocity > 0
 
+        if not self.has_enough_press_travel(positions):
+            return
+
         if velocity_change > self.threshold and is_press_motion:
             if self.is_in_cooldown(handedness, lm_id, timestamp_ms):
                 return
@@ -193,6 +231,10 @@ class HandTracker:
 
                 self.parse_key(collections.Counter(self.last_fingertip_keys[handedness][lm_id]).most_common(1))
 
+    def has_enough_press_travel(self, positions):
+        press_travel = max(positions) - min(positions)
+        return press_travel >= self.min_press_travel
+
     def is_in_cooldown(self, handedness, lm_id, timestamp_ms):
         last_press_timestamp = self.last_press_timestamps[handedness].get(lm_id)
         if last_press_timestamp is None:
@@ -201,6 +243,9 @@ class HandTracker:
         return timestamp_ms - last_press_timestamp < self.press_cooldown_ms
 
     def detect_key(self, keyboard_point):
+        if keyboard_point is None:
+            return None
+
         keyboard_layout = self.keyboard_tracker.keyboard_layout
         for key, dimensions in keyboard_layout.items():
             if key in ("KeyboardWidth", "KeyboardHeight"):

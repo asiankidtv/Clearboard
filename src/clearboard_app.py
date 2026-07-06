@@ -12,10 +12,12 @@ from config import (
     DETECTED_KEYBOARD,
     FINGERTIP_HISTORY_SIZE,
     KEY_HISTORY_SIZE,
+    KEYBOARD_POINT_SMOOTHING_ALPHA,
     HAND_TASK_PATH,
     KEYBOARD_MODEL_PATH,
     MANUAL_CORNER_LABELS,
     MANUAL_CORNER_SHORT_LABELS,
+    MIN_PRESS_TRAVEL,
     PRESS_COOLDOWN_MS,
     SMOOTHING_ALPHA,
     THRESHOLD,
@@ -35,8 +37,10 @@ class ClearboardApp:
         self.threshold = THRESHOLD
         self.fingertip_history_size = FINGERTIP_HISTORY_SIZE
         self.key_history_size = KEY_HISTORY_SIZE
+        self.min_press_travel = MIN_PRESS_TRAVEL
         self.press_cooldown_ms = PRESS_COOLDOWN_MS
         self.smoothing_alpha = SMOOTHING_ALPHA
+        self.keyboard_point_smoothing_alpha = KEYBOARD_POINT_SMOOTHING_ALPHA
 
         self.cam = None
         self.keyboard_model = None
@@ -47,7 +51,9 @@ class ClearboardApp:
             self.fingertip_history_size,
             self.keyboard,
             self.press_cooldown_ms,
+            self.min_press_travel,
             self.smoothing_alpha,
+            self.keyboard_point_smoothing_alpha,
             self.key_history_size
         )
 
