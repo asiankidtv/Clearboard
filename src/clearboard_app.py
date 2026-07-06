@@ -1,5 +1,7 @@
 import cv2 as cv
 import mediapipe as mp
+import numpy as np
+import textwrap
 from time import sleep, time
 from textblob import TextBlob
 from ultralytics import YOLO
@@ -25,6 +27,7 @@ from keyboard_tracker import KeyboardTracker
 class ClearboardApp:
     def __init__(self):
         self.window_name = "Hand Result"
+        self.text_window_name = "Typed Text"
         self.hand_task_path = HAND_TASK_PATH
         self.keyboard_model_path = KEYBOARD_MODEL_PATH
         self.camera_id = CAMERA_ID
@@ -64,6 +67,7 @@ class ClearboardApp:
         self.cam = self.create_camera()
         self.keyboard_model = self.create_keyboard_model()
         cv.namedWindow(self.window_name)
+        cv.namedWindow(self.text_window_name)
         cv.setMouseCallback(self.window_name, self.handle_mouse_click)
 
     def create_camera(self):
@@ -112,6 +116,7 @@ class ClearboardApp:
             # frame = self.process_keyboard_detection(frame)
             self.process_hand_detection(frame, landmarker)
             self.show_frame(frame)
+            self.show_text_window(self.hand_tracker.text)
 
             if self.handle_keypress():
                 break
@@ -192,7 +197,9 @@ class ClearboardApp:
         key = cv.waitKey(1)
 
         if key & 0xFF == ord("q"):
-            self.correctText(self.hand_tracker.text)
+            corrected_text = self.correctText(self.hand_tracker.text)
+            self.show_text_window(corrected_text, final=True)
+            cv.waitKey(0)
             return True
 
         if key & 0xFF == ord("c"):
@@ -218,6 +225,73 @@ class ClearboardApp:
     def correctText(self, text):
         if text:
             textBlob = TextBlob(text)
-            print(textBlob.correct())
+            corrected_text = str(textBlob.correct())
+            print(corrected_text)
+            return corrected_text
         else:
             print("No text detected")
+            return ""
+
+    def show_text_window(self, text, final=False):
+        frame = self.create_text_window_frame(text, final)
+        cv.imshow(self.text_window_name, frame)
+
+    def create_text_window_frame(self, text, final=False):
+        frame = np.full((360, 720, 3), 245, dtype=np.uint8)
+        title = "Final Corrected Message" if final else "Typed Text"
+        body = text if text else ""
+
+        cv.putText(
+            frame,
+            title,
+            (24, 42),
+            cv.FONT_HERSHEY_SIMPLEX,
+            0.85,
+            (40, 40, 40),
+            2,
+            cv.LINE_AA,
+        )
+
+        if not body:
+            body = "No text detected" if final else "Waiting for keypresses..."
+
+        y = 88
+        for line in textwrap.wrap(body, width=58):
+            cv.putText(
+                frame,
+                line,
+                (24, y),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (25, 25, 25),
+                1,
+                cv.LINE_AA,
+            )
+            y += 32
+
+            if y > 300:
+                cv.putText(
+                    frame,
+                    "...",
+                    (24, y),
+                    cv.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (25, 25, 25),
+                    1,
+                    cv.LINE_AA,
+                )
+                break
+
+        if final:
+            cv.putText(
+                frame,
+                "Press any key to close",
+                (24, 336),
+                cv.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (90, 90, 90),
+                1,
+                cv.LINE_AA,
+            )
+
+        return frame
