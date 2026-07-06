@@ -109,7 +109,7 @@ class ClearboardApp:
                 print("Camera Frame not Found.")
                 break
 
-            frame = self.process_keyboard_detection(frame)
+            # frame = self.process_keyboard_detection(frame)
             self.process_hand_detection(frame, landmarker)
             self.show_frame(frame)
 

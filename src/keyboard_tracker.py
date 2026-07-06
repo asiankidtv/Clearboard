@@ -1,7 +1,12 @@
 import cv2 as cv
 import numpy as np
 
-
+"""
+    - This class's purpose is to keep track of keyboard detection and annotation
+    - Corner clicking and calibration
+        - Ordering Corners, calculating homography etc.
+    - Also in charge of mapping key presses to the location on keyboard
+"""
 class KeyboardTracker:
     def __init__(self, confidence_req, keyboard_layout):
         self.confidence_req = confidence_req
