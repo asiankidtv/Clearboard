@@ -16,6 +16,16 @@ class KeyboardTracker:
         self.homography = None
         self.inverse_homography = None
 
+    def reset(self):
+        self.corners = None
+        self.locked = False
+        self.homography = None
+        self.inverse_homography = None
+
+    def set_keyboard_layout(self, keyboard_layout):
+        self.keyboard_layout = keyboard_layout
+        self.reset()
+
     def detect(self, frame, model):
         if self.locked:
             self.draw_key_zones(frame)

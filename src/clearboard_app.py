@@ -1,3 +1,4 @@
+import os
 import cv2 as cv
 import mediapipe as mp
 import numpy as np
@@ -44,6 +45,9 @@ class ClearboardApp:
 
         self.cam = None
         self.keyboard_model = None
+        self.landmarker = None
+        self.windows_enabled = False
+        self.latest_frame = None
         self.manual_corner_points = []
         self.keyboard = KeyboardTracker(self.confidence_req, DETECTED_KEYBOARD)
         self.hand_tracker = HandTracker(
@@ -59,19 +63,30 @@ class ClearboardApp:
 
     def run(self):
         try:
-            self.setup()
-            if not self.warm_up_camera():
+            if not self.start(open_windows=True):
                 print("Camera could not start")
                 return
 
-            with self.create_hand_landmarker() as landmarker:
-                self.frame_loop(landmarker)
+            self.frame_loop()
         finally:
             self.cleanup()
 
-    def setup(self):
+    def start(self, open_windows=False):
+        self.setup(open_windows=open_windows)
+        if not self.warm_up_camera():
+            return False
+
+        self.landmarker = self.create_hand_landmarker()
+        return True
+
+    def setup(self, open_windows=False):
+        self.windows_enabled = open_windows
         self.cam = self.create_camera()
         self.keyboard_model = self.create_keyboard_model()
+        if self.windows_enabled:
+            self.setup_windows()
+
+    def setup_windows(self):
         cv.namedWindow(self.window_name)
         cv.namedWindow(self.text_window_name)
         cv.setMouseCallback(self.window_name, self.handle_mouse_click)
@@ -80,6 +95,10 @@ class ClearboardApp:
         return cv.VideoCapture(self.camera_id, cv.CAP_AVFOUNDATION)
 
     def create_keyboard_model(self):
+        if not os.path.exists(self.keyboard_model_path):
+            print(f"Keyboard model not found at {self.keyboard_model_path}")
+            return None
+
         return YOLO(self.keyboard_model_path)
 
     def create_hand_landmarker_options(self):
@@ -112,7 +131,8 @@ class ClearboardApp:
 
         return False
 
-    def frame_loop(self, landmarker):
+    def frame_loop(self, landmarker=None):
+        active_landmarker = landmarker or self.landmarker
         while True:
             frame_exists, frame = self.read_frame()
             if not frame_exists:
@@ -120,7 +140,8 @@ class ClearboardApp:
                 break
 
             # frame = self.process_keyboard_detection(frame)
-            self.process_hand_detection(frame, landmarker)
+            self.latest_frame = frame.copy()
+            self.process_hand_detection(frame, active_landmarker)
             self.show_frame(frame)
             self.show_text_window(self.hand_tracker.text)
 
@@ -131,34 +152,70 @@ class ClearboardApp:
         return self.cam.read()
 
     def process_keyboard_detection(self, frame):
+        if self.keyboard_model is None:
+            return frame
+
         return self.keyboard.detect(frame, self.keyboard_model)
 
     def process_hand_detection(self, frame, landmarker):
+        if landmarker is None:
+            return
+
         rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
         landmarker.detect_async(mp_image, int(time() * 1000))
 
-    def show_frame(self, fallback_frame):
+    def process_next_frame(self):
+        frame_exists, frame = self.read_frame()
+        if not frame_exists:
+            return None
+
+        self.latest_frame = frame.copy()
+        self.process_hand_detection(frame, self.landmarker)
+        return self.get_display_frame(frame)
+
+    def detect_keyboard_once(self):
+        if self.latest_frame is None or self.keyboard_model is None:
+            return False
+
+        if not self.keyboard.locked:
+            self.keyboard.reset()
+
+        self.process_keyboard_detection(self.latest_frame.copy())
+        return self.keyboard.corners is not None
+
+    def get_display_frame(self, fallback_frame):
         if self.hand_tracker.current_frame is not None:
             frame = self.hand_tracker.current_frame
         else:
             frame = fallback_frame
 
         frame = frame.copy()
+        if not self.keyboard.locked and self.keyboard.corners is not None:
+            self.keyboard.draw_corners(frame)
         self.draw_manual_corner_points(frame)
+        return frame
+
+    def show_frame(self, fallback_frame):
+        frame = self.get_display_frame(fallback_frame)
         cv.imshow(self.window_name, frame)
 
     def handle_mouse_click(self, event, x, y, _flags, _param):
         if event == cv.EVENT_RBUTTONDOWN:
-            self.manual_corner_points = []
-            print("Manual corner selection reset")
+            self.reset_manual_corner_selection()
             return
 
         if event != cv.EVENT_LBUTTONDOWN:
             return
 
+        self.select_manual_corner(x, y)
+
+    def select_manual_corner(self, x, y):
         if self.keyboard.locked:
-            return
+            return False
+
+        if not self.manual_corner_points and self.keyboard.corners is not None:
+            self.keyboard.reset()
 
         if len(self.manual_corner_points) >= 4:
             self.manual_corner_points = []
@@ -168,18 +225,41 @@ class ClearboardApp:
         print(f"Manual {corner_label} corner selected: ({x}, {y})")
 
         if len(self.manual_corner_points) == 4:
-            self.lock_keyboard_from_manual_points()
+            return self.lock_keyboard_from_manual_points()
+
+        return True
+
+    def reset_manual_corner_selection(self):
+        self.manual_corner_points = []
+        print("Manual corner selection reset")
+
+    def reset_keyboard_calibration(self):
+        self.manual_corner_points = []
+        self.keyboard.reset()
+        print("Keyboard calibration reset")
+
+    def set_keyboard_layout(self, keyboard_layout):
+        self.manual_corner_points = []
+        self.keyboard.set_keyboard_layout(keyboard_layout)
+        print("Keyboard layout changed")
+
+    def get_next_manual_corner_label(self):
+        if self.keyboard.locked:
+            return "Locked"
+
+        return MANUAL_CORNER_LABELS[len(self.manual_corner_points)]
 
     def lock_keyboard_from_manual_points(self):
         if not self.keyboard.lock_from_points(self.manual_corner_points):
             print("Cannot lock keyboard: manual corners were invalid")
             print("Expected order: top-left, top-right, bottom-right, bottom-left")
             self.manual_corner_points = []
-            return
+            return False
 
         for corner in self.keyboard.corners:
             print(corner)
         print("Keyboard homography computed")
+        return True
 
     def draw_manual_corner_points(self, frame):
         if self.keyboard.locked:
@@ -216,16 +296,24 @@ class ClearboardApp:
     def lock_keyboard(self):
         if not self.keyboard.lock():
             print("Cannot lock keyboard: no valid corners detected")
-            return
+            return False
 
         print("Keyboard Corners Locked")
         for corner in self.keyboard.corners:
             print(corner)
         print("Keyboard homography computed")
+        return True
 
     def cleanup(self):
+        if self.landmarker is not None:
+            self.landmarker.close()
+            self.landmarker = None
+
         if self.cam is not None:
             self.cam.release()
+            self.cam = None
+
+        self.keyboard_model = None
         cv.destroyAllWindows()
 
     def correctText(self, text):
@@ -237,6 +325,12 @@ class ClearboardApp:
         else:
             print("No text detected")
             return ""
+
+    def correct_text(self, text):
+        return self.correctText(text)
+
+    def clear_text(self):
+        self.hand_tracker.text = ""
 
     def show_text_window(self, text, final=False):
         frame = self.create_text_window_frame(text, final)

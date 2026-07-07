@@ -40,7 +40,13 @@ src/hand_landmarker.task
 
 `best.pt` is the YOLO keyboard detection model and can either be replaced with an Oriented Bounding Box model found online or self-trained. `hand_landmarker.task` is the MediaPipe hand landmark model and can be found from Google.
 
-4. Run the app:
+4. Run the desktop interface:
+
+```bash
+python src/desktop_main.py
+```
+
+You can still run the original OpenCV-window prototype:
 
 ```bash
 python src/main.py
@@ -48,8 +54,17 @@ python src/main.py
 
 ## Basic Use
 
-- Choose the desired keyboardLayout from `keyboardLayouts.py`
+- In the desktop interface, press Start to open the camera.
+- Choose the desired keyboard layout from the layout menu.
 - Click the four keyboard corners in this order: top-left, top-right, bottom-right, bottom-left.
+- Use Reset to clear calibration and choose corners again.
+- Use Detect Once and Lock Detected to try the YOLO keyboard detector if `src/best.pt` is available.
+- The typed text panel updates while the app is running, and Correct replaces it with the TextBlob-corrected result.
+
+Original OpenCV controls are still available with `python src/main.py`:
+
+- Left-click four keyboard corners in this order: top-left, top-right, bottom-right, bottom-left.
+- Right-click clears manual corner selection.
 - Press `c` to lock YOLO-detected keyboard corners if available.
 - Press `q` to quit.
 - A second window shows the typed text while the app is running.
